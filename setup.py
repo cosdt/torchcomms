@@ -218,6 +218,7 @@ BACKEND_FLAGS = [
     ("rccl", USE_RCCL),
     ("rcclx", USE_RCCLX),
     ("xccl", USE_XCCL),
+    ("hccl", USE_HCCL),
 ]
 
 ext_modules = [CMakeExtension("torchcomms._comms")]
