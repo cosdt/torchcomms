@@ -15,11 +15,18 @@ set(HCCL_LIB_PATH "$ENV{ASCEND_TOOLKIT_HOME}/aarch64-linux/lib64")
 set(HCCL_SHARED_LIB "${HCCL_LIB_PATH}/libhccl.so")
 set(ACL_SHARED_LIB "${HCCL_LIB_PATH}/libascendcl.so")
 execute_process(
-    COMMAND ${Python3_EXECUTABLE} -c "import os, torch_npu; print(os.path.dirname(torch_npu.__file__))"
+    COMMAND ${Python3_EXECUTABLE} -c "import importlib.util, pathlib, sys; spec = importlib.util.find_spec('torch_npu'); sys.stdout.write(str(pathlib.Path(spec.origin).resolve().parent) if spec and spec.origin else '')"
     OUTPUT_VARIABLE TORCH_NPU_PKG_DIR
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
+    RESULT_VARIABLE TORCH_NPU_DISCOVERY_RESULT
 )
+
+if(NOT TORCH_NPU_DISCOVERY_RESULT EQUAL 0 OR NOT TORCH_NPU_PKG_DIR)
+    message(WARNING "torch_npu package not found. Skipping HCCL backend compilation.")
+    return()
+endif()
+
 set(TORCH_NPU_INCLUDE "${TORCH_NPU_PKG_DIR}/include")
 set(TORCH_NPU_LIB_DIR "${TORCH_NPU_PKG_DIR}/lib")
 set(TORCH_NPU_SHARED_LIB "${TORCH_NPU_LIB_DIR}/libtorch_npu.so")
