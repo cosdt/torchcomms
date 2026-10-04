@@ -1,0 +1,198 @@
+name: Sync
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-and-rebase-and-build:
+    runs-on: ubuntu-22.04-arm
+    container:
+      image: ascendai/cann:8.5.0-910b-ubuntu22.04-py3.11
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.COSDT_BOT_TOKEN }}
+          path: repo
+
+      - name: Configure git
+        working-directory: repo
+        run: |
+          git config user.name "torchcomms-sync-bot"
+          git config user.email "torchcomms-sync-bot@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        working-directory: repo
+        run: |
+          git remote add upstream https://github.com/meta-pytorch/torchcomms.git
+          git fetch upstream main
+          git fetch origin main hccl
+
+      - name: Configure origin token
+        working-directory: repo
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.COSDT_BOT_TOKEN }}@github.com/${{ github.repository }}
+
+      - name: Sync main to upstream/main
+        working-directory: repo
+        run: |
+          git checkout -B main origin/main
+          git reset --hard upstream/main
+
+          mkdir -p .github/workflows
+          git checkout origin/main -- .github/workflows/sync.yml
+
+          git add .github/workflows/sync.yml
+          git commit -m "Keep custom workflows" || true
+
+          git push origin main --force
+
+      - name: Rebase hccl onto main
+        id: rebase
+        working-directory: repo
+        run: |
+          set -e
+
+          git checkout -B hccl origin/hccl
+
+          if git rebase upstream/main; then
+            git push --force-with-lease origin HEAD:hccl
+          else
+            git rebase --abort || true
+            exit 1
+          fi
+
+      - name: Notify on rebase conflict
+        if: failure() && steps.rebase.conclusion == 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.COSDT_BOT_TOKEN }}
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "[torchcomms] hccl rebase onto main failed",
+              body: "@orangeH25 hccl branch rebase failed.",
+            });
+
+      - name: Install Miniconda
+        run: |
+          set -euxo pipefail
+
+          wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda
+          echo "$HOME/miniconda/bin" >> $GITHUB_PATH
+
+      - name: Init conda
+        run: |
+          set -euxo pipefail
+
+          source $HOME/miniconda/etc/profile.d/conda.sh
+          conda --version
+
+      - name: Build
+        working-directory: repo
+        id: build
+        run: |
+          set -euxo pipefail
+
+          source $HOME/miniconda/etc/profile.d/conda.sh
+          conda create -n env-comms -y python=3.11
+          conda activate env-comms
+
+          pip install pyyaml packaging expecttest
+          pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install torch_npu==2.10.0
+          pip install attrs decorator "numpy>=1.24,<2.0.0" psutil scipy
+
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python -c "import torch, torch_npu; print(torch.__version__)"
+
+          conda install conda-forge::glog=0.4.0 conda-forge::gflags conda-forge::fmt -y
+          ls $CONDA_PREFIX/lib | grep -E "glog|gflags|fmt"
+
+          which python
+          python -V
+          which pip
+          pip -V
+          which cmake || true
+          cmake --version || true
+
+          USE_SYSTEM_LIBS=ON \
+          USE_HCCL=1 \
+          USE_NCCL=OFF \
+          USE_NCCLX=OFF \
+          USE_GLOO=OFF \
+          USE_RCCL=OFF \
+          USE_RCCLX=OFF \
+          USE_TRANSPORT=OFF \
+          CMAKE_BUILD_PARALLEL_LEVEL=1 \
+          VERBOSE=1 \
+          pip install --no-build-isolation -vvv .
+
+      - name: Dump build debug info
+        if: failure() && steps.build.conclusion == 'failure'
+        working-directory: repo
+        run: |
+          set -uxo pipefail
+
+          source $HOME/miniconda/etc/profile.d/conda.sh || true
+          conda --version || true
+          conda env list || true
+          conda activate env-comms || true
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+
+          echo "==== stdout ===="
+          python -c "import importlib.util, pathlib, sys; spec = importlib.util.find_spec('torch_npu'); sys.stdout.write(str(pathlib.Path(spec.origin).resolve().parent) if spec and spec.origin else '')" || true
+
+          echo
+          echo "==== stderr check ===="
+          python -c "import importlib.util, pathlib, sys; spec = importlib.util.find_spec('torch_npu'); sys.stdout.write('OK')" 2>&1 || true
+
+          echo "==== flags.make (hccl) ===="
+          find build -name flags.make -path "*hccl*" -print -exec sh -c 'echo "==== $1 ===="; cat -vet "$1"; echo; nl -ba "$1"' _ {} \; || true
+
+          echo "==== CMakeCache ===="
+          find build -name CMakeCache.txt -print -exec sh -c 'echo "==== $1 ===="; grep -nE "CMAKE_CXX_FLAGS|CMAKE_C_FLAGS|CMAKE_PREFIX_PATH|Python3_EXECUTABLE" "$1" || true' _ {} \; || true
+
+          echo "==== possible env pollution ===="
+          env | sort | grep -E '^(CC|CXX|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|CPATH|LIBRARY_PATH|CMAKE_|ASCEND|BASH_ENV|ENV)=' || true
+
+          echo "==== env ===="
+          env | sort
+          echo "==== python ===="
+          which python || true
+          python -V || true
+          python -c 'import sys; print(sys.executable)' || true
+          echo "==== pip ===="
+          which pip || true
+          pip -V || true
+          echo "==== cmake ===="
+          which cmake || true
+          cmake --version || true
+
+      - name: Notify on build failure
+        if: failure() && steps.build.conclusion == 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.COSDT_BOT_TOKEN }}
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "[torchcomms] HCCL build failed",
+              body: "@orangeH25 HCCL build failed. Please check the GitHub Actions log.",
+            });
