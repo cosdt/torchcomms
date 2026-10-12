@@ -85,7 +85,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: "[torchcomms] hccl rebase onto main failed",
-              body: "@orangeH25 hccl branch rebase failed.",
+              body: "hccl branch rebase failed.",
             });
 
       - name: Install Miniconda
@@ -194,5 +194,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: "[torchcomms] HCCL build failed",
-              body: "@orangeH25 HCCL build failed. Please check the GitHub Actions log.",
+              body: "HCCL build failed. Please check the GitHub Actions log.",
             });
